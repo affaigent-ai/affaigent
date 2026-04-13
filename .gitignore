@@ -51,3 +51,6 @@ infra/docker/.env
 
 # Docker overrides
 docker-compose.override.yml
+
+# Extra backup filename variants
+*.bak.*
