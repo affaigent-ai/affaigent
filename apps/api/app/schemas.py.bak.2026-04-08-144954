@@ -1,0 +1,80 @@
+from datetime import datetime
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
+
+
+IdentityKey = Literal["dennis_work", "linsey_work", "shared_private"]
+MemoryType = Literal[
+    "profile",
+    "preference",
+    "task_context",
+    "fact",
+    "entity_note",
+    "document_note",
+    "policy",
+    "conversation_note",
+    "system_note",
+]
+SourceKind = Literal[
+    "manual",
+    "conversation",
+    "gmail",
+    "calendar",
+    "drive",
+    "docs",
+    "sheets",
+    "browser",
+    "system",
+]
+Sensitivity = Literal["low", "normal", "high"]
+
+
+class CreateMemoryEntryRequest(BaseModel):
+    identity_key: IdentityKey
+    memory_type: MemoryType
+    content: str = Field(min_length=1)
+    title: str | None = None
+    summary: str | None = None
+    source_kind: SourceKind = "manual"
+    source_ref: str | None = None
+    source_event_at: datetime | None = None
+    importance: int = Field(default=3, ge=1, le=5)
+    sensitivity: Sensitivity = "normal"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+class MemoryEntryResponse(BaseModel):
+    memory_id: str
+    identity_key: IdentityKey
+    memory_type: str
+    title: str | None
+    content: str
+    summary: str | None
+    source_kind: str
+    source_ref: str | None
+    source_event_at: datetime | None
+    importance: int
+    sensitivity: str
+    status: str
+    metadata: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    connector_id: int | None = None
+
+class MemoryEntryListResponse(BaseModel):
+    items: list[MemoryEntryResponse]
+    count: int
+
+
+class ChunkMemoryResponse(BaseModel):
+    memory_id: str
+    chunks_created: int
+    status: str
+
+
+class EmbedMemoryResponse(BaseModel):
+    memory_id: str
+    chunks_embedded: int
+    qdrant_points_upserted: int
+    qdrant_status: str
+    status: str

@@ -1,0 +1,383 @@
+from uuid import uuid4
+
+from fastapi import FastAPI, HTTPException, Query
+from psycopg.types.json import Jsonb
+
+from app.config import settings
+from app.db import get_db
+from app.embeddings import get_embeddings
+from app.qdrant import upsert_points
+from app.schemas import (
+    ChunkMemoryResponse,
+    CreateMemoryEntryRequest,
+    EmbedMemoryResponse,
+    MemoryEntryListResponse,
+    MemoryEntryResponse,
+)
+
+app = FastAPI(title=settings.app_name)
+
+
+def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 150) -> list[str]:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return []
+
+    chunks: list[str] = []
+    start = 0
+    text_length = len(normalized)
+
+    while start < text_length:
+        end = min(text_length, start + chunk_size)
+        chunk = normalized[start:end]
+
+        if end < text_length:
+            last_space = chunk.rfind(" ")
+            if last_space > int(chunk_size * 0.6):
+                end = start + last_space
+                chunk = normalized[start:end]
+
+        chunk = chunk.strip()
+        if chunk:
+            chunks.append(chunk)
+
+        if end >= text_length:
+            break
+
+        next_start = end - overlap
+        if next_start <= start:
+            next_start = end
+        start = next_start
+
+    return chunks
+
+
+@app.get("/health")
+async def health() -> dict[str, str]:
+    return {
+        "status": "ok",
+        "app": settings.app_name,
+        "env": settings.app_env,
+    }
+
+
+@app.get("/contexts")
+async def contexts() -> dict[str, list[str]]:
+    return {
+        "identities": list(settings.identities),
+    }
+
+
+@app.post("/memory/entries", response_model=MemoryEntryResponse)
+async def create_memory_entry(payload: CreateMemoryEntryRequest) -> MemoryEntryResponse:
+    memory_id = str(uuid4())
+
+    query = """
+    INSERT INTO memory_entries (
+        memory_id,
+        identity_key,
+        memory_type,
+        title,
+        content,
+        summary,
+        source_kind,
+        source_ref,
+        source_event_at,
+        importance,
+        sensitivity,
+        metadata
+    )
+    VALUES (
+        %(memory_id)s,
+        %(identity_key)s,
+        %(memory_type)s,
+        %(title)s,
+        %(content)s,
+        %(summary)s,
+        %(source_kind)s,
+        %(source_ref)s,
+        %(source_event_at)s,
+        %(importance)s,
+        %(sensitivity)s,
+        %(metadata)s
+    )
+    RETURNING
+        memory_id,
+        identity_key,
+        connector_id,
+        memory_type,
+        title,
+        content,
+        summary,
+        source_kind,
+        source_ref,
+        source_event_at,
+        importance,
+        sensitivity,
+        status,
+        metadata,
+        created_at,
+        updated_at
+    """
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                query,
+                {
+                    "memory_id": memory_id,
+                    "identity_key": payload.identity_key,
+                    "memory_type": payload.memory_type,
+                    "title": payload.title,
+                    "content": payload.content,
+                    "summary": payload.summary,
+                    "source_kind": payload.source_kind,
+                    "source_ref": payload.source_ref,
+                    "source_event_at": payload.source_event_at,
+                    "importance": payload.importance,
+                    "sensitivity": payload.sensitivity,
+                    "metadata": Jsonb(payload.metadata),
+                },
+            )
+            row = cur.fetchone()
+
+    return MemoryEntryResponse(**row)
+
+
+@app.get("/memory/entries", response_model=MemoryEntryListResponse)
+async def list_memory_entries(
+    identity_key: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> MemoryEntryListResponse:
+    base_query = """
+    SELECT
+        memory_id,
+        identity_key,
+        connector_id,
+        memory_type,
+        title,
+        content,
+        summary,
+        source_kind,
+        source_ref,
+        source_event_at,
+        importance,
+        sensitivity,
+        status,
+        metadata,
+        created_at,
+        updated_at
+    FROM memory_entries
+    """
+    params: dict[str, object] = {"limit": limit, "offset": offset}
+
+    if identity_key:
+        if identity_key not in settings.identities:
+            raise HTTPException(status_code=400, detail="Invalid identity_key")
+        base_query += " WHERE identity_key = %(identity_key)s"
+        params["identity_key"] = identity_key
+
+    base_query += " ORDER BY created_at DESC LIMIT %(limit)s OFFSET %(offset)s"
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(base_query, params)
+            rows = cur.fetchall()
+
+    items = [MemoryEntryResponse(**row) for row in rows]
+    return MemoryEntryListResponse(items=items, count=len(items))
+
+
+@app.get("/memory/entries/{memory_id}", response_model=MemoryEntryResponse)
+async def get_memory_entry(memory_id: str) -> MemoryEntryResponse:
+    query = """
+    SELECT
+        memory_id,
+        identity_key,
+        connector_id,
+        memory_type,
+        title,
+        content,
+        summary,
+        source_kind,
+        source_ref,
+        source_event_at,
+        importance,
+        sensitivity,
+        status,
+        metadata,
+        created_at,
+        updated_at
+    FROM memory_entries
+    WHERE memory_id = %(memory_id)s
+    """
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, {"memory_id": memory_id})
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Memory entry not found")
+
+    return MemoryEntryResponse(**row)
+
+
+@app.post("/memory/entries/{memory_id}/chunk", response_model=ChunkMemoryResponse)
+async def chunk_memory_entry(memory_id: str) -> ChunkMemoryResponse:
+    select_query = """
+    SELECT
+        memory_id,
+        identity_key,
+        connector_id,
+        content
+    FROM memory_entries
+    WHERE memory_id = %(memory_id)s
+    """
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(select_query, {"memory_id": memory_id})
+            row = cur.fetchone()
+
+            if not row:
+                raise HTTPException(status_code=404, detail="Memory entry not found")
+
+            chunks = _chunk_text(row["content"])
+            if not chunks:
+                raise HTTPException(status_code=400, detail="Memory entry content is empty after normalization")
+
+            cur.execute(
+                "DELETE FROM memory_chunks WHERE memory_id = %(memory_id)s",
+                {"memory_id": memory_id},
+            )
+
+            for idx, chunk_text in enumerate(chunks):
+                cur.execute(
+                    """
+                    INSERT INTO memory_chunks (
+                        chunk_id,
+                        memory_id,
+                        identity_key,
+                        connector_id,
+                        chunk_index,
+                        chunk_text,
+                        embedding_status,
+                        metadata
+                    )
+                    VALUES (
+                        %(chunk_id)s,
+                        %(memory_id)s,
+                        %(identity_key)s,
+                        %(connector_id)s,
+                        %(chunk_index)s,
+                        %(chunk_text)s,
+                        'pending',
+                        %(metadata)s
+                    )
+                    """,
+                    {
+                        "chunk_id": str(uuid4()),
+                        "memory_id": row["memory_id"],
+                        "identity_key": row["identity_key"],
+                        "connector_id": row["connector_id"],
+                        "chunk_index": idx,
+                        "chunk_text": chunk_text,
+                        "metadata": Jsonb({}),
+                    },
+                )
+
+    return ChunkMemoryResponse(
+        memory_id=memory_id,
+        chunks_created=len(chunks),
+        status="ok",
+    )
+
+
+@app.post("/memory/entries/{memory_id}/embed", response_model=EmbedMemoryResponse)
+async def embed_memory_entry(memory_id: str) -> EmbedMemoryResponse:
+    query = """
+    SELECT
+        mc.chunk_id,
+        mc.chunk_index,
+        mc.chunk_text,
+        mc.identity_key,
+        mc.connector_id,
+        me.memory_type,
+        me.source_kind,
+        me.sensitivity,
+        me.status
+    FROM memory_chunks mc
+    JOIN memory_entries me ON me.memory_id = mc.memory_id
+    WHERE mc.memory_id = %(memory_id)s
+    ORDER BY mc.chunk_index ASC
+    """
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(query, {"memory_id": memory_id})
+            rows = cur.fetchall()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No chunks found for memory entry")
+
+    chunk_texts = [row["chunk_text"] for row in rows]
+
+    try:
+        vectors = get_embeddings(chunk_texts)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Embedding request failed: {exc}") from exc
+
+    points = []
+    for row, vector in zip(rows, vectors):
+        point_id = row["chunk_id"]
+        payload = {
+            "chunk_id": row["chunk_id"],
+            "memory_id": memory_id,
+            "identity_key": row["identity_key"],
+            "connector_id": row["connector_id"],
+            "chunk_index": row["chunk_index"],
+            "memory_type": row["memory_type"],
+            "source_kind": row["source_kind"],
+            "sensitivity": row["sensitivity"],
+            "status": row["status"],
+        }
+        points.append(
+            {
+                "id": point_id,
+                "vector": vector,
+                "payload": payload,
+            }
+        )
+
+    try:
+        qdrant_result = upsert_points(points)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Qdrant upsert failed: {exc}") from exc
+
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute(
+                    """
+                    UPDATE memory_chunks
+                    SET
+                        embedding_status = 'embedded',
+                        qdrant_point_id = %(qdrant_point_id)s,
+                        updated_at = NOW()
+                    WHERE chunk_id = %(chunk_id)s
+                    """,
+                    {
+                        "qdrant_point_id": row["chunk_id"],
+                        "chunk_id": row["chunk_id"],
+                    },
+                )
+
+    return EmbedMemoryResponse(
+        memory_id=memory_id,
+        chunks_embedded=len(rows),
+        qdrant_points_upserted=len(points),
+        qdrant_status=qdrant_result.get("result", {}).get("status", "unknown"),
+        status="ok",
+    )

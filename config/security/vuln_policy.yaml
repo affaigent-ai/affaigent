@@ -1,0 +1,72 @@
+version: 1
+
+defaults:
+  review_days: 14
+
+rules:
+  - id: postgres-gosu-cve-2025-68121
+    match:
+      component: postgres:16.13
+      cve: CVE-2025-68121
+      target: /usr/local/bin/gosu
+    decision: temporary_accept
+    rationale: >
+      Kwetsbaarheid zit in gosu in de image. Container draait niet privileged,
+      heeft geen extra capabilities en service is alleen lokaal bereikbaar.
+      Voor nu accepteren met herbeoordeling bij nieuwe upstream image.
+    expires_on: 2026-04-23
+    next_action: herbeoordelen_bij_image_update
+
+  - id: redis-gosu-cves
+    match:
+      component: redis:7.4.8-alpine
+      cves:
+        - CVE-2023-24538
+        - CVE-2023-24540
+        - CVE-2024-24790
+        - CVE-2025-68121
+      target: /usr/local/bin/gosu
+    decision: temporary_accept
+    rationale: >
+      Zelfde patroon als postgres: image-level issue, geen privileged container,
+      geen extra capabilities en alleen localhost exposed.
+    expires_on: 2026-04-23
+    next_action: herbeoordelen_bij_image_update
+
+  - id: qdrant-openssl-cve-2025-15467
+    match:
+      component: qdrant/qdrant:v1.16.3
+      cve: CVE-2025-15467
+      packages:
+        - libssl3t64
+        - openssl
+        - openssl-provider-legacy
+    decision: defer_with_monitoring
+    rationale: >
+      Bekende package-fix bestaat, maar eerdere custom patchpoging brak Qdrant
+      functioneel. Productiestack blijft nu leidend; eerst alleen monitoren en
+      later veilig in losse testcontainer opnieuw proberen.
+    expires_on: 2026-04-16
+    next_action: test_in_aparte_qdrant_testcontainer
+
+  - id: qdrant-runs-as-root
+    match:
+      component: qdrant/qdrant:v1.16.3
+      runtime_signal: container_user_root
+    decision: accepted_with_note
+    rationale: >
+      Container draait als 0:0. Geen direct incident, maar wel expliciet noteren
+      als hardeningpunt voor later.
+    expires_on: 2026-04-30
+    next_action: onderzoeken_of_non_root_mogelijk_is_zonder_storageproblemen
+
+  - id: reranker-not-in-baseline
+    match:
+      component: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9
+      runtime_signal: reranker_exited_137
+    decision: out_of_baseline
+    rationale: >
+      Reranker staat in compose maar draait nu niet stabiel en hoort niet bij de
+      werkende baseline van deze security-sprint.
+    expires_on: 2026-04-30
+    next_action: apart_testspoor_met_resourcecheck

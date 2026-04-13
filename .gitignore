@@ -1,0 +1,53 @@
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Runtime / logs
+*.log
+logs/
+data/telegram/poll_state.json
+
+# Persistent data volumes
+data/postgres/
+data/redis/
+data/qdrant/
+data/trivy-cache/
+
+# Entire runtime data and backups
+data/
+backups/
+logs/
+
+# Local config with secrets
+config/github/
+infra/docker/.env
+
+# Local backups / temp files
+*.bak
+*.bak_*
+*.ok_*
+*.retrieval_pre_*
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Docker overrides
+docker-compose.override.yml
