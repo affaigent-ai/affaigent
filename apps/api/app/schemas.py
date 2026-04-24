@@ -4,7 +4,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 
-IdentityKey = Literal["dennis_work", "linsey_work", "shared_private"]
+IdentityKey = Literal[
+    "dennis_work",
+    "dennis_private",
+    "linsey_work",
+    "linsey_private",
+    "shared_private",
+]
 MemoryType = Literal[
     "profile",
     "preference",
